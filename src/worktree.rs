@@ -15,6 +15,28 @@ pub enum Action {
     Open(String),
 }
 
+// On Enter, the sequence is:
+//
+//   1. Validate — Git checks that the input is a valid branch name.
+//   2. List — Find whether that branch already has a worktree. If found,
+//      open it and finish.
+//
+//   3. Common — Only with a root override: resolve the common Git
+//      directory to calculate the repository hash. Default placement
+//      skips this step.
+//
+//   4. Branch — Check whether the local branch exists, create the parent
+//      directories, and reserve the destination. Then request worktree
+//      creation, reusing the branch or creating it from HEAD.
+//
+//   5. Add — Handle successful creation and open the resulting directory
+//      in Zellij.
+//
+//   Paths are:
+//
+//   - Existing worktree: Validate → List → Open
+//   - Default location: Validate → List → Branch → Add → Open
+//   - Root override: Validate → List → Common → Branch → Add → Open
 #[derive(Debug, Clone, Copy)]
 enum Step {
     Validate,
