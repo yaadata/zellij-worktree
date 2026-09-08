@@ -36,7 +36,7 @@ Then update your config to use the local plugin:
 ```kdl
 shared_except "locked" "tab" {
     bind "Ctrl w" {
-        LaunchOrFocusPlugin "file:~/.config/zellij/plugins/zellij-worktree.wasm" {
+        LaunchOrFocusPlugin "worktree" {
             floating true
         }
     }
@@ -71,7 +71,7 @@ Set `worktree_root` to override both the location and name of the worktree root:
 
 ```kdl
 plugins {
-    worktree location="file:~/.config/zellij/plugins/zellij-worktree.wasm"
+    worktree location="file:~/.config/zellij/plugins/zellij-worktree.wasm" {
         worktree_root "dir:$HOME/.zellij/worktrees"
     }
 }

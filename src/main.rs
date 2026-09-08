@@ -27,6 +27,7 @@ struct State {
     repo_root: Option<String>,
     creation: Option<worktree::Creation>,
     worktree_root: Option<String>,
+    session_environment: BTreeMap<String, String>,
     initial_cwd: std::path::PathBuf,
     host_root_ready: bool,
     pending_creation: Option<worktree::Action>,
@@ -46,6 +47,7 @@ impl Default for State {
             repo_root: None,
             creation: None,
             worktree_root: None,
+            session_environment: BTreeMap::new(),
             initial_cwd: std::path::PathBuf::new(),
             host_root_ready: false,
             pending_creation: None,
@@ -111,9 +113,8 @@ impl State {
             Ok(worktree::Action::Open(path)) => {
                 self.waiting_for_command = false;
                 self.creation = None;
-                let tab_name = self.get_tab_name(&path);
-                new_tab(Some(&tab_name), Some(&path));
-                close_self();
+                let tab_name = self.input.clone();
+                self.open_worktree(&path, &tab_name);
             }
             Err(error) => {
                 self.waiting_for_command = false;
@@ -124,12 +125,31 @@ impl State {
         }
     }
 
-    fn get_tab_name(&self, path: &str) -> String {
+    fn fallback_tab_name(path: &str) -> String {
         std::path::Path::new(path)
             .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("worktree")
             .to_string()
+    }
+
+    fn open_worktree(&mut self, path: &str, tab_name: &str) {
+        let Some(shell) = self.session_environment.get("SHELL") else {
+            self.error_message = Some("Could not determine the session shell".into());
+            return;
+        };
+        let command = CommandToRun {
+            path: shell.into(),
+            cwd: Some(path.into()),
+            ..Default::default()
+        };
+        let (tab_id, _) = open_command_pane_in_new_tab(command, BTreeMap::new());
+        if let Some(tab_id) = tab_id {
+            rename_tab_with_id(tab_id as u64, format!("(branch) {tab_name}"));
+            close_self();
+        } else {
+            self.error_message = Some(format!("Could not open worktree: {path}"));
+        }
     }
 
     fn clear_state(&mut self) {
@@ -170,7 +190,9 @@ impl ZellijPlugin for State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::RunCommands,
+            PermissionType::OpenTerminalsOrPlugins,
             PermissionType::FullHdAccess,
+            PermissionType::ReadSessionEnvironmentVariables,
         ]);
 
         subscribe(&[
@@ -205,9 +227,14 @@ impl ZellijPlugin for State {
                     BareKey::Enter => match self.mode {
                         Mode::List => {
                             if let Some(worktree) = self.worktrees.get(self.selected_index) {
-                                let tab_name = self.get_tab_name(&worktree.path);
-                                new_tab(Some(&tab_name), Some(&worktree.path));
-                                close_self();
+                                let path = worktree.path.clone();
+                                let tab_name = worktree
+                                    .branch
+                                    .as_deref()
+                                    .and_then(|branch| branch.strip_prefix("refs/heads/"))
+                                    .map(str::to_owned)
+                                    .unwrap_or_else(|| Self::fallback_tab_name(&path));
+                                self.open_worktree(&path, &tab_name);
                             }
                         }
                         Mode::Create => {
@@ -224,6 +251,7 @@ impl ZellijPlugin for State {
                                             self.input.clone(),
                                             repo,
                                             self.worktree_root.clone(),
+                                            &self.session_environment,
                                         )
                                     });
                                 match result {
@@ -390,6 +418,10 @@ impl ZellijPlugin for State {
             }
             Event::PermissionRequestResult(PermissionStatus::Denied) => {
                 self.creation_action(Err("Required plugin permissions were denied".into()));
+                true
+            }
+            Event::PermissionRequestResult(PermissionStatus::Granted) => {
+                self.session_environment = get_session_environment_variables();
                 true
             }
             Event::HostFolderChanged(path) => {

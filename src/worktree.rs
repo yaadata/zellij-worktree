@@ -1,4 +1,5 @@
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -57,14 +58,26 @@ pub fn project_path(root: &str, common: &str, branch: &str) -> String {
         .into_owned()
 }
 
-pub fn resolve_root(config: &str) -> Result<PathBuf, String> {
+pub fn resolve_root(
+    config: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<PathBuf, String> {
     let config = config
         .strip_prefix("dir:")
         .ok_or("worktree_root must start with dir:")?;
     let expanded = shellexpand::full_with_context(
         config,
-        || std::env::var("HOME").ok().filter(|home| !home.is_empty()),
-        |name| std::env::var(name).map(Some),
+        || {
+            environment
+                .get("HOME")
+                .cloned()
+                .or_else(|| std::env::var("HOME").ok())
+                .filter(|home| !home.is_empty())
+        },
+        |name| match environment.get(name) {
+            Some(value) => Ok(Some(value.clone())),
+            None => std::env::var(name).map(Some),
+        },
     )
     .map_err(|error| format!("Could not expand worktree_root: {error}"))?;
     let path = PathBuf::from(expanded.as_ref());
@@ -128,12 +141,15 @@ impl Creation {
         branch: String,
         repo: String,
         root: Option<String>,
+        environment: &BTreeMap<String, String>,
     ) -> Result<(Self, Action), String> {
         if branch.is_empty() || branch.starts_with('-') || branch == "HEAD" {
             return Err("Invalid branch name".into());
         }
         let root = root
-            .map(|root| resolve_root(&root).map(|path| path.to_string_lossy().into_owned()))
+            .map(|root| {
+                resolve_root(&root, environment).map(|path| path.to_string_lossy().into_owned())
+            })
             .transpose()?;
         let creation = Self {
             branch,
@@ -282,7 +298,36 @@ impl Creation {
                     )
                 }
             }
-            Step::Add => Action::Open(self.path.clone()),
+            Step::Add => {
+                let path = canonical_host_directory(Path::new(&self.path))?;
+                Action::Open(
+                    path.to_str()
+                        .ok_or("Worktree path is not valid UTF-8")?
+                        .to_owned(),
+                )
+            }
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolves_root_from_session_environment() {
+        let environment = BTreeMap::from([
+            ("HOME".into(), "/home/alice".into()),
+            ("WORKTREE_HOME".into(), "/worktrees".into()),
+        ]);
+
+        assert_eq!(
+            resolve_root("dir:$HOME/.zellij/worktrees", &environment),
+            Ok(PathBuf::from("/home/alice/.zellij/worktrees"))
+        );
+        assert_eq!(
+            resolve_root("dir:$WORKTREE_HOME", &environment),
+            Ok(PathBuf::from("/worktrees"))
+        );
     }
 }
