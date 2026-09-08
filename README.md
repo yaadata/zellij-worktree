@@ -61,9 +61,16 @@ Existing worktrees still open at their original paths.
 ```bash
 git clone https://github.com/sharph/zellij-worktree
 cd zellij-worktree
-cargo build --release
-mkdir -p ~/.config/zellij/plugins
-cp target/wasm32-wasip1/release/zellij-worktree.wasm ~/.config/zellij/plugins/
+mise install
+mise exec -- just install
+```
+
+The default destination is `$ZELLIJ_CONFIG_DIR/plugins`, falling back to
+Zellij's standard `~/.config/zellij/plugins` directory. To install the plugin
+in another directory, pass it to the recipe:
+
+```bash
+mise exec -- just install /path/to/plugins
 ```
 
 Then update your config to use the local plugin:
