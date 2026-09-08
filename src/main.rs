@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use yansi::Paint;
 use zellij_tile::prelude::*;
+use zellij_worktree::worktree;
 
 #[derive(Debug, Clone, PartialEq)]
 enum Mode {
@@ -24,7 +25,11 @@ struct State {
     error_message: Option<String>,
     waiting_for_command: bool,
     repo_root: Option<String>,
-    base_path: Option<String>,
+    creation: Option<worktree::Creation>,
+    worktree_root: Option<String>,
+    initial_cwd: std::path::PathBuf,
+    host_root_ready: bool,
+    pending_creation: Option<worktree::Action>,
     initialized: bool,
     first_render: bool,
 }
@@ -39,7 +44,11 @@ impl Default for State {
             error_message: None,
             waiting_for_command: false,
             repo_root: None,
-            base_path: None,
+            creation: None,
+            worktree_root: None,
+            initial_cwd: std::path::PathBuf::new(),
+            host_root_ready: false,
+            pending_creation: None,
             initialized: false,
             first_render: true,
         }
@@ -87,32 +96,31 @@ impl State {
         self.selected_index = 0;
     }
 
-    fn resolve_worktree_path(&self, input: &str) -> Option<String> {
-        // Absolute paths
-        if input.starts_with('/') || input.starts_with('~') {
-            return Some(input.to_string());
-        }
-
-        // Relative paths starting with ./ or ../
-        if input.starts_with("./") || input.starts_with("../") {
-            if let Some(repo_root) = &self.repo_root {
-                let repo_path = std::path::Path::new(repo_root);
-                return Some(repo_path.join(input).to_string_lossy().to_string());
+    fn creation_action(&mut self, result: Result<worktree::Action, String>) {
+        match result {
+            Ok(worktree::Action::Run(command)) => {
+                self.waiting_for_command = true;
+                let args: Vec<&str> = command.args.iter().map(String::as_str).collect();
+                run_command_with_env_variables_and_cwd(
+                    &args,
+                    BTreeMap::new(),
+                    command.cwd.into(),
+                    BTreeMap::from([("command".into(), "create".into())]),
+                );
             }
-            return None;
-        }
-
-        // Branch names - create in base_path or parent directory
-        if let Some(base_path) = &self.base_path {
-            Some(format!("{}/{}", base_path, input))
-        } else if let Some(repo_root) = &self.repo_root {
-            let parent = std::path::Path::new(repo_root)
-                .parent()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
-            Some(format!("{}/{}", parent, input))
-        } else {
-            None
+            Ok(worktree::Action::Open(path)) => {
+                self.waiting_for_command = false;
+                self.creation = None;
+                let tab_name = self.get_tab_name(&path);
+                new_tab(Some(&tab_name), Some(&path));
+                close_self();
+            }
+            Err(error) => {
+                self.waiting_for_command = false;
+                self.creation = None;
+                self.pending_creation = None;
+                self.error_message = Some(error);
+            }
         }
     }
 
@@ -145,16 +153,24 @@ impl State {
 
         let mut context = BTreeMap::new();
         context.insert("command".to_string(), "rev-parse".to_string());
-        run_command(&["git", "rev-parse", "--show-toplevel"], context);
+        run_command_with_env_variables_and_cwd(
+            &["git", "rev-parse", "--show-toplevel"],
+            BTreeMap::new(),
+            self.initial_cwd.clone(),
+            context,
+        );
     }
 }
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        self.initial_cwd = get_plugin_ids().initial_cwd;
+        self.worktree_root = configuration.get("worktree_root").cloned();
         request_permission(&[
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
             PermissionType::RunCommands,
+            PermissionType::FullHdAccess,
         ]);
 
         subscribe(&[
@@ -162,11 +178,10 @@ impl ZellijPlugin for State {
             EventType::RunCommandResult,
             EventType::TabUpdate,
             EventType::Visible,
+            EventType::HostFolderChanged,
+            EventType::FailedToChangeHostFolder,
+            EventType::PermissionRequestResult,
         ]);
-
-        if let Some(base_path) = configuration.get("base_path") {
-            self.base_path = Some(base_path.clone());
-        }
     }
 
     fn update(&mut self, event: Event) -> bool {
@@ -197,25 +212,32 @@ impl ZellijPlugin for State {
                         }
                         Mode::Create => {
                             if !self.input.is_empty() {
-                                if let Some(path) = self.resolve_worktree_path(&self.input) {
-                                    let tab_name = self.get_tab_name(&path);
-                                    self.waiting_for_command = true;
-                                    self.error_message = None;
-
-                                    let mut context = BTreeMap::new();
-                                    context
-                                        .insert("command".to_string(), "worktree-add".to_string());
-                                    context.insert("tab_name".to_string(), tab_name);
-                                    context.insert("path".to_string(), path.clone());
-                                    run_command(&["git", "worktree", "add", &path], context);
-                                } else {
-                                    self.error_message = Some(
-                                        [
-                                            "Could not resolve path".to_string(),
-                                            self.repo_root.clone().unwrap_or_default(),
-                                        ]
-                                        .concat(),
-                                    );
+                                self.error_message = None;
+                                let result = self
+                                    .repo_root
+                                    .clone()
+                                    .ok_or_else(|| {
+                                        "Could not determine repository root".to_string()
+                                    })
+                                    .and_then(|repo| {
+                                        worktree::Creation::start(
+                                            self.input.clone(),
+                                            repo,
+                                            self.worktree_root.clone(),
+                                        )
+                                    });
+                                match result {
+                                    Ok((creation, action)) => {
+                                        self.creation = Some(creation);
+                                        if self.host_root_ready {
+                                            self.creation_action(Ok(action));
+                                        } else {
+                                            self.waiting_for_command = true;
+                                            self.pending_creation = Some(action);
+                                            change_host_folder(std::path::PathBuf::from("/"));
+                                        }
+                                    }
+                                    Err(error) => self.creation_action(Err(error)),
                                 }
                             }
                         }
@@ -227,8 +249,10 @@ impl ZellijPlugin for State {
                                 let mut context = BTreeMap::new();
                                 context
                                     .insert("command".to_string(), "worktree-remove".to_string());
-                                run_command(
+                                run_command_with_env_variables_and_cwd(
                                     &["git", "worktree", "remove", &worktree.path],
+                                    BTreeMap::new(),
+                                    self.initial_cwd.clone(),
                                     context,
                                 );
                             }
@@ -289,12 +313,17 @@ impl ZellijPlugin for State {
                     "rev-parse" => {
                         if exit_code == Some(0) {
                             let output = String::from_utf8_lossy(&stdout);
-                            let path = output.trim().to_string();
+                            let path = output.strip_suffix('\n').unwrap_or(&output).to_string();
                             if !path.is_empty() {
                                 self.repo_root = Some(path);
                                 let mut context = BTreeMap::new();
                                 context.insert("command".to_string(), "worktree-list".to_string());
-                                run_command(&["git", "worktree", "list", "--porcelain"], context);
+                                run_command_with_env_variables_and_cwd(
+                                    &["git", "worktree", "list", "--porcelain"],
+                                    BTreeMap::new(),
+                                    self.initial_cwd.clone(),
+                                    context,
+                                );
                             } else {
                                 self.waiting_for_command = false;
                                 self.error_message =
@@ -306,30 +335,23 @@ impl ZellijPlugin for State {
                         }
                     }
                     "worktree-list" => {
-                        self.parse_worktree_list(&stdout);
-                        self.initialized = true;
                         self.waiting_for_command = false;
+                        if exit_code == Some(0) {
+                            self.parse_worktree_list(&stdout);
+                            self.initialized = true;
+                        } else {
+                            let error = String::from_utf8_lossy(&stderr).trim().to_string();
+                            self.error_message = Some(if error.is_empty() {
+                                "Could not list worktrees".to_string()
+                            } else {
+                                format!("Could not list worktrees: {}", error)
+                            });
+                        }
                     }
-                    "worktree-add" => {
-                        self.waiting_for_command = false;
-
-                        match exit_code {
-                            Some(0) => {
-                                if let (Some(tab_name), Some(path)) =
-                                    (context.get("tab_name"), context.get("path"))
-                                {
-                                    new_tab(Some(&tab_name), Some(&path));
-                                    close_self();
-                                }
-                            }
-                            Some(code) => {
-                                let error = String::from_utf8_lossy(&stderr);
-                                self.error_message =
-                                    Some(format!("Error ({}): {}", code, error.trim()));
-                            }
-                            None => {
-                                self.error_message = Some("Command failed".to_string());
-                            }
+                    "create" => {
+                        if let Some(creation) = &mut self.creation {
+                            let result = creation.advance(exit_code, &stdout, &stderr);
+                            self.creation_action(result);
                         }
                     }
                     "worktree-remove" => {
@@ -341,7 +363,12 @@ impl ZellijPlugin for State {
                                 self.clear_state();
                                 let mut ctx = BTreeMap::new();
                                 ctx.insert("command".to_string(), "worktree-list".to_string());
-                                run_command(&["git", "worktree", "list", "--porcelain"], ctx);
+                                run_command_with_env_variables_and_cwd(
+                                    &["git", "worktree", "list", "--porcelain"],
+                                    BTreeMap::new(),
+                                    self.initial_cwd.clone(),
+                                    ctx,
+                                );
                                 self.waiting_for_command = true;
                             }
                             Some(code) => {
@@ -359,6 +386,29 @@ impl ZellijPlugin for State {
                         self.waiting_for_command = false;
                     }
                 }
+                true
+            }
+            Event::PermissionRequestResult(PermissionStatus::Denied) => {
+                self.creation_action(Err("Required plugin permissions were denied".into()));
+                true
+            }
+            Event::HostFolderChanged(path) => {
+                self.host_root_ready = path == std::path::Path::new("/");
+                if let Some(action) = self.pending_creation.take() {
+                    if self.host_root_ready && std::path::Path::new("/host").is_dir() {
+                        self.creation_action(Ok(action));
+                    } else {
+                        self.creation_action(Err("Host filesystem mapping is unavailable".into()));
+                    }
+                }
+                true
+            }
+            Event::FailedToChangeHostFolder(error) => {
+                self.host_root_ready = false;
+                self.creation_action(Err(format!(
+                    "Could not access host filesystem: {}",
+                    error.unwrap_or_default()
+                )));
                 true
             }
             Event::TabUpdate(tabs) => {
@@ -434,7 +484,7 @@ impl ZellijPlugin for State {
                 println!("{}", "Create Worktree".cyan().bold());
                 println!("{}", "[Esc] back to list".bright_black());
                 println!();
-                print!("Path/branch: {}", self.input);
+                print!("Branch: {}", self.input);
                 println!("{}", "_".blink());
 
                 if let Some(error) = &self.error_message {

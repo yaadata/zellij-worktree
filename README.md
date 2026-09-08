@@ -10,7 +10,8 @@ A Zellij plugin for managing git worktrees.
 - **Open in new tab**: Select a worktree and open it in a new tab
 - **Create worktrees**: Create new worktrees and open them in new tabs
 - **Delete worktrees**: Delete worktrees with confirmation
-- **Smart path resolution**: Branch names create worktrees in parent directory; full paths are used as-is
+- **Deterministic placement**: Worktrees default to
+  `<repository>/.worktrees/<normalized-branch>`, with an optional shared root
 
 ## Configuration and Installation
 
@@ -34,15 +35,26 @@ shared_except "locked" "tab" {
 }
 ```
 
-### Optional: Custom base path
+### Worktree root override
+
+Set `worktree_root` to override both the location and name of the worktree root:
 
 ```kdl
 plugins {
     worktree location="https://github.com/sharph/zellij-worktree/releases/latest/download/zellij-worktree.wasm" {
-        base_path "~/projects"
+        worktree_root "dir:$HOME/.zellij/worktrees"
     }
 }
 ```
+
+Without an override, worktrees live inside the current checkout at
+`<repository>/.worktrees/<normalized-branch>`. Every override must start with
+`dir:`, for example `dir:~/.zellij/worktrees`, `dir:$HOME`, or
+`dir:/absolute/path`.
+
+Overrides use
+`<worktree_root>/<repository-name>-<short-hash>/<normalized-branch>-<short-hash>`.
+Existing worktrees still open at their original paths.
 
 ### Build from source
 
@@ -78,11 +90,23 @@ shared_except "locked" "tab" {
 
 1. Open the plugin
 2. Press `n` to create a new worktree
-3. Type a branch name or full path
-   - Branch name: creates worktree at `base_path/<branch-name>` (if configured) or `../<branch-name>`
-   - Relative path (starting with `./` or `../`): relative to repo root
-   - Full path (starting with `/` or `~`): uses exact path
+3. Type a branch name. Paths and revision shortcuts are not accepted.
 4. Press `Enter` to create the worktree and open a new tab
+
+By default, worktrees are created at
+`<current-checkout>/.worktrees/<normalized-branch>`. Creating from a linked
+worktree uses that checkout's own `.worktrees` directory. Add `.worktrees/` to
+your repository's ignore rules to keep these directories out of its
+untracked-file listing; the plugin does not change ignore files.
+
+Only the directory name replaces `/` and `\` with `-`: branch `yadi/feature-a`
+uses directory `yadi-feature-a` locally and `yadi-feature-a-<short-hash>` under
+an override. If the branch already has a worktree, its existing location opens
+instead, including the main checkout.
+
+Occupied destinations and normalized-name collisions produce an error. Existing
+worktrees are never moved or automatically deleted. The former `base_path`
+setting is ignored; use `worktree_root` to override placement.
 
 ### Delete Worktree
 
@@ -94,18 +118,18 @@ shared_except "locked" "tab" {
 
 ### Keybindings
 
-| Key | Action |
-|-----|--------|
-| `Esc` | Close plugin / Cancel action |
-| `Ctrl+c` | Close plugin |
-| `Enter` | Open selected worktree / Confirm action |
-| `j`/`k` or ↑/↓ | Navigate list |
-| `n` | Create new worktree |
-| `d` | Delete selected worktree |
+| Key            | Action                                  |
+| -------------- | --------------------------------------- |
+| `Esc`          | Close plugin / Cancel action            |
+| `Ctrl+c`       | Close plugin                            |
+| `Enter`        | Open selected worktree / Confirm action |
+| `j`/`k` or ↑/↓ | Navigate list                           |
+| `n`            | Create new worktree                     |
+| `d`            | Delete selected worktree                |
 
 ## Requirements
 
-- Zellij 0.42.0 or later
+- Zellij 0.45.1 or later
 - Git
 
 ## License
