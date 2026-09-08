@@ -33,6 +33,11 @@ pub struct Creation {
     root: Option<String>,
 }
 
+fn branch_directory(branch: &str) -> String {
+    let hash = format!("{:x}", Sha256::digest(branch.as_bytes()));
+    format!("{}-{}", branch.replace(['/', '\\'], "-"), &hash[..6])
+}
+
 pub fn project_path(root: &str, common: &str, branch: &str) -> String {
     let common_path = Path::new(common);
     let repo_path = if common_path.file_name().is_some_and(|name| name == ".git") {
@@ -45,14 +50,9 @@ pub fn project_path(root: &str, common: &str, branch: &str) -> String {
         .and_then(|name| name.to_str())
         .unwrap_or("repository");
     let repo_hash = format!("{:x}", Sha256::digest(common.as_bytes()));
-    let branch_hash = format!("{:x}", Sha256::digest(branch.as_bytes()));
     Path::new(root)
-        .join(format!("{repo_name}-{}", &repo_hash[..12]))
-        .join(format!(
-            "{}-{}",
-            branch.replace(['/', '\\'], "-"),
-            &branch_hash[..12]
-        ))
+        .join(format!("{repo_name}-{}", &repo_hash[..6]))
+        .join(branch_directory(branch))
         .to_string_lossy()
         .into_owned()
 }
@@ -169,7 +169,7 @@ impl Creation {
             project_path(root, &self.common, &self.branch)
         } else {
             Path::new(root)
-                .join(self.branch.replace(['/', '\\'], "-"))
+                .join(branch_directory(&self.branch))
                 .to_string_lossy()
                 .into_owned()
         };
